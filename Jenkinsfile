@@ -1,29 +1,67 @@
 pipeline {
-    agent any
+    agent {
+       kubernetes {
+           yaml """
+apiVersion: v1 
+kind: Pod 
+metadata: 
+    name: dind
+    annotations:
+      container.apparmor.security.beta.kubernetes.io/dind: unconfined
+      container.seccomp.security.alpha.kubernetes.io/dind: unconfined
+spec: 
+    containers: 
+      - name: dind
+        image: docker:dind
+        securityContext:
+          privileged: true
+        tty: true
+        volumeMounts:
+        - name: var-run
+          mountPath: /var/run
+      - name: jnlp
+        securityContext:
+          runAsUser: 0
+          fsGroup: 0
+        volumeMounts:
+        - name: var-run
+          mountPath: /var/run
+        
+    volumes:
+    - emptyDir: {}
+      name: var-run
+"""
+       }
+   }
+
+    parameters { 
+        string(name: 'DOCKER_REPOSITORY', defaultValue: 'sysdigcicd/cronagent', description: 'Name of the image to be built (e.g.: sysdiglabs/dummy-vuln-app)') 
+    }
+    
     environment {
         DOCKER = credentials('docker-repository-credentials')
     }
+    
     stages {
         stage('Checkout') {
             steps {
-                checkout scm
+                container("dind") {
+                    checkout scm
+                }
             }
         }
         stage('Build Image') {
             steps {
-                sh "sudo docker build -f Dockerfile -t sysdigcicd/cronagent ."
-            }
-        }
-        stage('Push Image') {
-            steps {
-                sh "sudo docker login --username ${DOCKER_USR} --password ${DOCKER_PSW}"
-                sh "sudo docker push sysdigcicd/cronagent"
-                sh "echo docker.io/sysdigcicd/cronagent > sysdig_secure_images"
+                container("dind") {
+                    sh "docker build -f Dockerfile -t ${params.DOCKER_REPOSITORY} ."
+                    sh "echo ${params.DOCKER_REPOSITORY} > sysdig_secure_images"
+                }
             }
         }
         stage('Scanning Image') {
             steps {
-                sysdigSecure 'sysdig_secure_images'
+                // This will always be executed in the JNLP container
+                sysdig engineCredentialsId: 'sysdig-secure-api-credentials', name: 'sysdig_secure_images', inlineScanning: true
             }
         }
    }
